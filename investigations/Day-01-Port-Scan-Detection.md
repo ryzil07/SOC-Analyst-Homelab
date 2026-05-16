@@ -1,5 +1,5 @@
-# 🔍 SOC Investigation Report — Day 01
-## Reconnaissance: Port Scan Detection & Analysis
+# SOC Investigation Report — Day 01
+## Port Scan Detection & Analysis
 
 ---
 
@@ -7,24 +7,42 @@
 |-------|---------|
 | **Report ID** | SOC-2026-001 |
 | **Date** | May 16, 2026 |
-| **Analyst** | [Your Name] |
-| **Severity** | 🟡 Medium |
-| **Status** | ✅ Detected & Documented |
+| **Analyst** | ryzil07 |
+| **Severity** | Medium |
+| **Status** | Detected & Documented |
 | **MITRE Technique** | T1595 — Active Scanning |
 
----
-
-## 1. Executive Summary
-
-On May 16, 2026 at approximately 05:15:48, a TCP SYN port scan was detected originating from internal host `192.168.56.101` (Kali Linux — Attacker Machine) targeting the Windows production host at `192.168.56.1`. The scan was performed using **Nmap 7.99** and successfully identified 6 open ports including the critically vulnerable **SMB port 445**.
-
-The attack was detected by **Wazuh SIEM v4.7.3** via Windows Filtering Platform audit logs (Event ID 5157). Initial SIEM configuration required tuning — Event IDs 5156 and 5157 were excluded by default and had to be re-enabled to achieve detection. This highlights a common real-world SIEM gap: default configurations are rarely sufficient for comprehensive threat detection.
-
-A critical security gap was also identified during this investigation: **Wazuh SIEM infrastructure ports were visible to the attacker**, enabling potential defender discovery. Firewall remediation was applied immediately.
+> **Security Notice:** All hostnames, usernames, and personal
+> identifiers have been redacted. Lab IPs (192.168.56.x/24)
+> are private host-only addresses — no external exposure.
 
 ---
 
-## 2. Lab Architecture
+## 1. What Happened
+
+I ran a port scan from my Kali Linux VM against my Windows machine
+to simulate what an attacker does during the reconnaissance phase
+of an attack. The scan used Nmap's SYN technique — the same method
+real attackers use because it's stealthy and doesn't complete a
+full connection.
+
+The scan found 6 open ports. The most dangerous one was **port 445
+(SMB)** — the same port exploited by WannaCry ransomware in 2017.
+
+During the investigation I also discovered that my **Wazuh SIEM
+dashboard was visible to the attacker** on port 443. A real attacker
+would use that to identify and potentially disable my defenses before
+attacking. I fixed this immediately with a firewall rule.
+
+Detection wasn't straightforward either — the default Wazuh config
+was **actively filtering out** the exact Event IDs needed to detect
+port scans (5156 and 5157). I had to dig into the agent config,
+identify the exclusion, and remove it before detection worked. This
+is a common real-world gap in SIEM deployments.
+
+---
+
+## 2. Lab Setup
 
 ```
 ┌─────────────────────┐         ┌──────────────────────┐
@@ -33,108 +51,81 @@ A critical security gap was also identified during this investigation: **Wazuh S
 │   (Attacker)        │  ATTACK │   (Victim/Defender)  │
 └─────────────────────┘         └──────────────────────┘
                                           │
-                                          │ Logs
+                                          │ logs forwarded
                                           ▼
                                 ┌──────────────────────┐
                                 │   Wazuh SIEM 4.7.3   │
-                                │   (Docker Container) │
-                                │   https://localhost  │
+                                │   Docker on Windows  │
                                 └──────────────────────┘
 ```
 
-**Tools Running on Windows Host:**
-- Sysmon (SwiftOnSecurity config) — process & file monitoring
-- Wazuh Agent v4.7.3 — log forwarding to SIEM
-- Windows Audit Logging — network connection events
+**Running on Windows host:**
+- Sysmon with SwiftOnSecurity ruleset
+- Wazuh Agent v4.7.3
+- Windows Security Audit Logging (enabled manually)
 
 ---
 
-## 3. Attack Details
+## 3. The Attack
 
-### 3.1 Attack Tool
-**Nmap 7.99** — Industry standard network scanner used by both attackers and security professionals.
+### Commands I Ran from Kali
 
-### 3.2 Commands Executed
-
-**Scan 1 — Full Deep Scan (Reconnaissance):**
+**Full scan — all 65,535 ports:**
 ```bash
 sudo nmap -sS -sV -O -p- 192.168.56.1
 ```
 
-| Flag | Meaning |
-|------|---------|
-| `-sS` | SYN Scan — stealthy, half-open connection |
-| `-sV` | Service version detection |
-| `-O` | OS fingerprinting |
-| `-p-` | All 65,535 ports scanned |
+| Flag | What it does |
+|------|-------------|
+| `-sS` | SYN scan — sends half-open packets, never completes handshake |
+| `-sV` | Detects service versions on open ports |
+| `-O` | Tries to identify the OS |
+| `-p-` | Scans every single port, not just common ones |
 
-**Duration:** 171.93 seconds  
-**Result:** 21 open ports discovered
+Took 171 seconds. Found 21 open ports.
 
----
-
-**Scan 2 — Targeted Quick Scan (Verification):**
+**Quick follow-up scan:**
 ```bash
 sudo nmap -sS 192.168.56.1
 ```
-**Duration:** 4.65 seconds  
-**Result:** 6 open ports confirmed
+Took 4 seconds. Confirmed 6 key open ports.
 
 ---
 
-### 3.3 Attack Timeline
+### What the Scan Found
 
-| Time (UTC-4) | Event |
-|---|---|
-| `05:15:48` | Nmap SYN scan initiated from `192.168.56.101` |
-| `05:15:48` | Windows Filtering Platform begins blocking packets |
-| `05:15:48` | Event ID 5157 generated — multiple instances |
-| `05:15:49` | Wazuh audit failure alerts begin firing |
-| `05:15:56` | Final audit failure event captured |
-| `05:16:00` | Scan completes — attacker has full port map |
+| Port | Service | Risk | Why it matters |
+|------|---------|------|----------------|
+| 135 | Windows RPC | Medium | Remote procedure calls |
+| 139 | NetBIOS | High | Old protocol — disabled after this investigation |
+| 445 | SMB | **Critical** | WannaCry/EternalBlue vector |
+| 5357 | WSDAPI | Medium | Windows device discovery |
+| 8000 | Splunk | Medium | SIEM web interface visible |
+| 8089 | Splunk API | Medium | Management port exposed |
 
----
-
-## 4. Findings — Open Ports Discovered
-
-The attacker successfully mapped the following open ports:
-
-| Port | Protocol | Service | Risk Level | Notes |
-|------|----------|---------|------------|-------|
-| `135` | TCP | Microsoft Windows RPC | 🟡 Medium | Remote procedure calls |
-| `139` | TCP | NetBIOS-SSN | 🔴 High | Legacy protocol, multiple vulnerabilities |
-| `445` | TCP | Microsoft SMB | 🔴 **Critical** | EternalBlue/WannaCry attack vector |
-| `5357` | TCP | WSDAPI / HTTP | 🟡 Medium | Windows device discovery |
-| `8000` | TCP | Splunk HTTP | 🟡 Medium | SIEM interface exposed |
-| `8089` | TCP | Splunk API | 🟡 Medium | Management API visible |
-
-### ⚠️ Critical Finding — Port 445 (SMB)
-
-Port 445 is the attack surface used by:
-- **WannaCry Ransomware** (2017) — infected 200,000+ systems globally
-- **EternalBlue Exploit (MS17-010)** — NSA-developed exploit leaked by Shadow Brokers
-- **NotPetya** — destructive wiper disguised as ransomware
-
-**This port being open and visible to an attacker is a critical risk.**
+**Port 445 is the critical finding here.** This is exactly what
+EternalBlue targets — the exploit behind WannaCry (2017) and
+NotPetya. In a real engagement this would be flagged immediately
+for emergency patching.
 
 ---
 
-### 4.1 Additional Finding — SIEM Infrastructure Exposed
+### Bonus Finding — My SIEM Was Visible
 
-During the initial deep scan, the attacker also discovered:
+The deep scan also found these ports open:
 
-| Port | Service | Implication |
-|------|---------|-------------|
-| `443` | Wazuh Dashboard | Attacker knows a SIEM is running |
-| `9200` | Wazuh Indexer (OpenSearch) | Database port exposed |
-| `55000` | Wazuh API | Management API accessible |
-| `1514/1515` | Wazuh Agent ports | Agent communication visible |
+| Port | What it revealed |
+|------|-----------------|
+| 443 | Wazuh dashboard login page |
+| 9200 | Wazuh database (OpenSearch) |
+| 55000 | Wazuh management API |
 
-This is **MITRE ATT&CK T1518.001 — Software Discovery: Security Software Discovery**. A sophisticated attacker would use this information to attempt to disable the SIEM before launching further attacks.
+An attacker seeing this knows I'm running Wazuh and could try to
+access or disable it before attacking. I fixed this with a firewall
+rule blocking those ports from the attacker IP:
 
-**Remediation Applied:**
 ```powershell
-New-NetFirewallRule -DisplayName "Block Kali from Wazuh Dashboard" `
+New-NetFirewallRule -DisplayName "Block Attacker from Wazuh" `
   -Direction Inbound `
   -RemoteAddress 192.168.56.101 `
   -LocalPort 443,9200,55000,1514,1515 `
@@ -142,158 +133,114 @@ New-NetFirewallRule -DisplayName "Block Kali from Wazuh Dashboard" `
   -Action Block
 ```
 
-**Verification — After Fix:**
-```
-PORT      STATE    SERVICE
-443/tcp   filtered https       ← was: open
-9200/tcp  filtered wap-wsp     ← was: open
-55000/tcp filtered unknown     ← was: open
-```
-✅ SIEM ports successfully hidden from attacker.
+After the fix, those ports showed as `filtered` on a follow-up scan.
 
 ---
 
-## 5. Detection Evidence
+## 4. Timeline
 
-### 5.1 How Detection Was Achieved
+| Time | What happened |
+|------|--------------|
+| 05:15:48 | Nmap SYN scan starts from 192.168.56.101 |
+| 05:15:48 | Windows Filtering Platform starts dropping packets |
+| 05:15:48 | Event ID 5157 begins generating |
+| 05:15:49 | Wazuh starts firing audit failure alerts |
+| 05:15:56 | Last alert captured |
+| 05:16:00 | Scan complete — attacker now has full port map |
 
-| Component | Role |
-|-----------|------|
-| Windows Audit Policy | Enabled logging for `Filtering Platform Connection` and `Filtering Platform Packet Drop` |
-| Event ID 5157 | Windows blocked inbound connection — logged each Nmap probe |
-| Wazuh Agent | Forwarded Security logs to SIEM |
-| Wazuh SIEM | Aggregated events and raised alerts |
+---
 
-**Audit Policy Commands Used:**
+## 5. How I Detected It
+
+### Step 1 — Enable Windows Network Logging
+
+Windows doesn't log network connections by default. I had to
+manually enable this:
+
 ```powershell
 auditpol /set /subcategory:"Filtering Platform Connection" /success:enable /failure:enable
 auditpol /set /subcategory:"Filtering Platform Packet Drop" /success:enable /failure:enable
 ```
 
-### 5.2 Wazuh Alert Details
+This generates **Event ID 5157** for every blocked connection —
+which is exactly what an Nmap SYN scan creates hundreds of.
+
+### Step 2 — Fix the Wazuh Config
+
+This was the tricky part. After enabling logging, alerts still
+weren't showing in Wazuh. I dug into the agent config at:
+
+```
+C:\Program Files (x86)\ossec-agent\ossec.conf
+```
+
+And found this in the Security log collection section:
+
+```xml
+<query>Event/System[EventID != 5156 and EventID != 5157...]</query>
+```
+
+The default config was **deliberately excluding** Event IDs 5156
+and 5157. Removed both exclusions, restarted the agent, and
+detection worked immediately.
+
+### Step 3 — What Wazuh Caught
 
 | Field | Value |
 |-------|-------|
-| Agent | Windows-Host |
-| Rule Description | Windows audit failure event |
+| Rule | Windows audit failure event |
 | Rule Level | 5 |
-| Rule ID | 60104 |
 | Event ID | 5157 |
-| Source IP | `192.168.56.101` |
-| Destination IP | `192.168.56.1` |
+| Source IP | 192.168.56.101 (Kali — attacker) |
+| Destination | 192.168.56.1 (Windows — victim) |
 | Direction | Inbound |
 | Action | Blocked |
-
-### 5.3 SIEM Configuration Gap — Identified & Fixed
-
-> **Important Finding:** Default Wazuh agent configuration explicitly excluded Event IDs 5156 and 5157:
->
-> ```xml
-> <query>Event/System[EventID != 5156 and EventID != 5157...]</query>
-> ```
->
-> These exclusions prevented port scan detection entirely. The configuration was modified to remove these exclusions, enabling full network connection visibility.
->
-> **Lesson:** Default SIEM configurations are never sufficient. SOC analysts must audit and tune their detection rules for their specific environment.
 
 ---
 
 ## 6. MITRE ATT&CK Mapping
 
-```
-TACTIC: Reconnaissance (TA0043)
-│
-├── T1595 — Active Scanning
-│   └── T1595.001 — Scanning IP Blocks
-│       ├── Tool: Nmap 7.99
-│       ├── Method: TCP SYN Scan (-sS)
-│       └── Target: 192.168.56.1
-│
-└── T1518.001 — Software Discovery: Security Software Discovery
-    ├── Finding: Wazuh SIEM ports exposed (443, 9200, 55000)
-    └── Risk: Attacker aware of defensive tooling
-```
-
-| ATT&CK Field | Value |
-|---|---|
-| Tactic | Reconnaissance |
+| Field | Value |
+|-------|-------|
+| Tactic | Reconnaissance (TA0043) |
 | Technique | T1595 — Active Scanning |
 | Sub-technique | T1595.001 — Scanning IP Blocks |
-| Secondary Technique | T1518.001 — Security Software Discovery |
-| Tool Used | Nmap 7.99 |
-| Platform | Windows |
+| Secondary | T1518.001 — Security Software Discovery |
+| Tool | Nmap 7.99 |
+
+The secondary technique (T1518.001) applies because Nmap revealed
+my SIEM infrastructure — a defender discovery scenario.
 
 ---
 
-## 7. OS Fingerprinting Result
+## 7. What I Fixed After This Investigation
 
-Nmap successfully identified the target operating system:
-
-```
-Running: Microsoft Windows 11
-Confidence: 97%
-CPE: cpe:/o:microsoft:windows_11
-```
-
-**Implication:** With OS information confirmed, an attacker can now look up Windows 11 specific exploits, unpatched CVEs, and default misconfigurations to target in follow-up attacks.
-
----
-
-## 8. Recommendations
-
-### Immediate Actions
-
-| Priority | Action | Command/Method |
-|----------|--------|----------------|
-| 🔴 Critical | Verify MS17-010 patch (EternalBlue) | `Get-HotFix -Id KB4012212` |
-| 🔴 Critical | Restrict SMB (445) from untrusted segments | Windows Firewall rule |
-| 🔴 High | Disable NetBIOS (139) | Network adapter → WINS → Disable |
-| 🟡 Medium | Move SIEM to isolated management VLAN | Network segmentation |
-| 🟡 Medium | Restrict Splunk ports to localhost only | Splunk config |
-| 🟢 Low | Disable WSDAPI (5357) if not needed | Services → Disable |
-
-### Long-term SOC Improvements
-
-1. **Create custom Wazuh rule** for port scan detection — trigger alert when more than 15 connection failures occur from same IP within 60 seconds
-2. **Implement network segmentation** — SIEM should never be on the same network segment as untrusted hosts
-3. **Enable VPN-only SIEM access** — dashboard should not be reachable without authentication at network level
-4. **Set up automated active response** — Wazuh can automatically block IPs that trigger port scan alerts
+| Action | Status |
+|--------|--------|
+| Disabled NetBIOS (port 139) | ✅ Done |
+| Blocked SIEM ports from attacker | ✅ Done |
+| Enabled Windows network audit logging | ✅ Done |
+| Fixed Wazuh config (5156/5157) | ✅ Done |
+| Verify EternalBlue patch (KB4012212) | Pending |
+| Restrict SMB (445) from untrusted segments | Pending |
 
 ---
 
-## 9. Lessons Learned
+## 8. What I Learned
 
-| # | Lesson |
-|---|--------|
-| 1 | Default SIEM configurations require tuning — 5156/5157 excluded by default |
-| 2 | SIEM infrastructure must be hidden from attacker-accessible networks |
-| 3 | Port 445 being open represents a critical unmitigated risk |
-| 4 | Reconnaissance detection is the first line of defense — catch attackers before they attack |
-| 5 | OS fingerprinting gives attackers a significant advantage — consider TCP/IP stack hardening |
+The biggest takeaway from this investigation wasn't the port scan
+itself — it was discovering that my SIEM had a blind spot by default.
+Event IDs 5156 and 5157 are some of the most useful events for
+detecting network reconnaissance, and Wazuh was silently dropping
+them. In a real SOC environment this kind of gap could mean missing
+an attacker's early reconnaissance entirely.
 
----
-
-## 10. Evidence Files
-
-| Evidence | Description |
-|----------|-------------|
-| `nmap-scan-1-full.txt` | Full Nmap output — 65,535 port scan |
-| `nmap-scan-2-quick.txt` | Quick scan output — 6 open ports |
-| `nmap-scan-3-wazuh-ports.txt` | Verification scan — filtered ports confirmed |
-| `wazuh-alert-screenshot.png` | Wazuh dashboard showing audit failure alerts |
-| `wazuh-event-detail.png` | Expanded event showing sourceAddress 192.168.56.101 |
-| `wazuh-mitre-dashboard.png` | MITRE ATT&CK mapping in Wazuh |
-| `wazuh-agent-active.png` | Windows-Host agent active confirmation |
+The second lesson was OPSEC — exposing your SIEM on the same network
+as potential attackers is a real problem. In enterprise environments,
+SIEM infrastructure sits on a dedicated management VLAN with no
+direct access from user or untrusted networks.
 
 ---
 
-## 11. Analyst Notes
-
-> This was the first investigation conducted in this SOC home lab environment. Several configuration challenges were encountered and resolved during this investigation, including fixing a corrupt Kali history file, reconfiguring the VM network adapter from NAT to Host-Only, enabling Windows Firewall audit logging, and tuning the Wazuh agent configuration to capture network events.
->
-> Each challenge encountered represents a real-world SOC scenario — production environments frequently have misconfigured agents, incomplete logging pipelines, and detection gaps that analysts must identify and remediate. Documenting these issues and their resolutions is as valuable as the detection itself.
-
----
-
-*Report generated as part of Home SOC Lab — Daily Investigation Series*  
-*GitHub: [your-github-url] | LinkedIn: [your-linkedin-url]*
+*Part of my Home SOC Lab daily investigation series.*
+*GitHub: https://github.com/ryzil07/SOC-Analyst-Homelab*
